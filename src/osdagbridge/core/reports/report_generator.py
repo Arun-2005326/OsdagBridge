@@ -156,7 +156,8 @@ def preamble(project_name, job_number, report_date, report_version='Rev 0'):
 \documentclass[12pt,a4paper]{report}
 
 % Packages
-\usepackage[a4paper, margin=1in]{geometry}
+% --- Centralized Page Geometry (avoids footer collision) ---
+\usepackage[a4paper, top=25mm, bottom=32mm, left=20mm, right=20mm, headheight=16pt, footskip=14mm]{geometry}
 \usepackage{graphicx}
 \usepackage{amsmath}
 \usepackage{amssymb}
@@ -180,6 +181,15 @@ def preamble(project_name, job_number, report_date, report_version='Rev 0'):
 \usepackage{subcaption}
 \usepackage{multirow}
 \usepackage{colortbl}
+\makeatletter
+\providecommand{\insert@pcolumn}{\insert@column}
+\providecommand{\UseTaggingSocket}[1]{}
+\providecommand{\CT@tbl@gdecr@row@count}{}
+\makeatother
+\ExplSyntaxOn
+\cs_if_exist:NF \tbl_gdecr_row_count: { \cs_new:Nn \tbl_gdecr_row_count: {} }
+\cs_if_exist:NF \tag_mc_end: { \cs_new:Nn \tag_mc_end: {} }
+\ExplSyntaxOff
 \usepackage{longtable}
 \setlength{\LTleft}{\fill}
 \setlength{\LTright}{\fill}
@@ -192,21 +202,31 @@ def preamble(project_name, job_number, report_date, report_version='Rev 0'):
 
 \numberwithin{table}{chapter}
 \numberwithin{figure}{chapter}
-% Table layout and spacing: consistent padding, row height, and longtable pre/post skips
-\setlength{\tabcolsep}{6pt}
-\renewcommand{\arraystretch}{1.12}
-\setlength{\LTpre}{0pt}
+
+% Table layout and spacing per Centralized Design System
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.22}
+\setlength{\LTpre}{2pt}
 \setlength{\LTpost}{6pt}
-% Table rules (outline thickness) and small extra row height for clarity
 \setlength{\arrayrulewidth}{0.5pt}
 \setlength{\extrarowheight}{0.6pt}
 
-% Prevent tables from overflowing past the page bottom:
-% if fewer than 5 baseline-skips remain, break to the next page first.
+% Prevent tables from breaking awkwardly across page bottoms
 \BeforeBeginEnvironment{table}{\needspace{5\baselineskip}}
 \BeforeBeginEnvironment{longtable}{\needspace{5\baselineskip}}
 
+% Centralized Color Definitions
 \definecolor{osdagGreen}{HTML}{91B014}
+\definecolor{osdagGreenDark}{HTML}{6D850E}
+\definecolor{navyPrimary}{HTML}{1B365D}
+\definecolor{slateDark}{HTML}{2C3E50}
+\definecolor{greyBorder}{HTML}{D5D8DC}
+\definecolor{headerBg}{HTML}{EAEDED}
+\definecolor{rowLight}{HTML}{F8F9FA}
+\definecolor{passGreen}{HTML}{27AE60}
+\definecolor{warnOrange}{HTML}{E67E22}
+\definecolor{failRed}{HTML}{C0392B}
+\definecolor{mutedGrey}{HTML}{7F8C8D}
 
 \fancypagestyle{main}{
   \fancyhf{}
@@ -479,11 +499,11 @@ class ReportDataBridge:
         member    "diagonal" or "chord"
         force_type "tension" or "compression"
         """
-        from osdagbridge.core.bridge_types.plate_girder.results_data import _extract_osdag_summary
         try:
+            from osdagbridge.core.bridge_types.plate_girder.results_data import _extract_osdag_summary
             raw = self._cb_pair_designs()[pair][member][force_type]
             return _extract_osdag_summary(raw or {})
-        except (KeyError, TypeError):
+        except Exception:
             return {}
 
     def get_cb_pairs(self) -> list:
@@ -899,6 +919,22 @@ def generate_report(payload, request):
             quantities = calculate_material_quantities(payload.inputs, payload.output_dict)
             payload.inputs.update(quantities)
 
+            # Dynamic Engineering Visualizations (UR Dashboard & BOQ Analytics)
+            try:
+                from osdagbridge.core.reports.visualizations import generate_ur_dashboard, generate_boq_charts
+
+                ur_path = os.path.join(tmp_images, 'ur_dashboard.png')
+                if generate_ur_dashboard(payload.output_dict, payload.inputs, ur_path):
+                    fig_paths['ur_dashboard'] = 'images/ur_dashboard.png'
+
+                steel_path, conc_path = generate_boq_charts(payload.inputs, tmp_images)
+                if steel_path:
+                    fig_paths['boq_steel'] = 'images/boq_steel_quantities.png'
+                if conc_path:
+                    fig_paths['boq_concrete_rebar'] = 'images/boq_concrete_rebar.png'
+            except Exception as _viz_err:
+                logger.warning("Visualization generation error: %s", _viz_err)
+
             # ── Assemble LaTeX document (fig_paths now has tmp_dir paths) ──
             bridge = ReportDataBridge(payload.output_dict, payload.inputs, payload)
             span_m = float(payload.inputs.get(KEY_SPAN, 0) or 0)
@@ -910,9 +946,6 @@ def generate_report(payload, request):
             if payload.options.include_toc:
                 doc_parts.append(toc_section())
 
-            # Chapter inclusion is driven by the canonical section keys
-            # selected in the report-options dialog (TOC). The first three
-            # chapters are locked in the UI, so they are always present.
             secs = payload.options.sections
 
             doc_parts.append(executive_summary(payload.inputs, payload.output_dict, fig_paths))
@@ -924,11 +957,11 @@ def generate_report(payload, request):
             if 'analysis' in secs:
                 doc_parts.append(ch4_analysis(payload.analysis_summary, fig_paths, bridge, span_m))
             if 'design_checks' in secs:
-                doc_parts.append(ch5_design_checks(payload.design_checks, bridge))
+                doc_parts.append(ch5_design_checks(payload.design_checks, bridge, fig_paths))
             if 'drawings' in secs and payload.options.include_figures:
                 doc_parts.append(ch6_drawings(fig_paths))
 
-            doc_parts.append(ch7_quantities(payload.inputs))
+            doc_parts.append(ch7_quantities(payload.inputs, fig_paths))
 
             mode = str(payload.inputs.get(KEY_DESIGN_MODE, "Optimized")).strip().lower()
             is_custom = mode in {"custom", "customized"}
@@ -977,6 +1010,9 @@ def generate_report(payload, request):
                 shutil.copy2(tmp_tex, tex_path)
             if os.path.exists(tmp_pdf):
                 shutil.copy2(tmp_pdf, pdf_path)
+            tmp_log = os.path.join(tmp_dir, request.file_stem + '.log')
+            if os.path.exists(tmp_log):
+                shutil.copy2(tmp_log, os.path.join(request.output_dir, request.file_stem + '.log'))
 
         if os.path.exists(pdf_path):
             logger.info("Report generated: %s", pdf_path)
